@@ -56,24 +56,31 @@ use tantivy_fst::Regex;
 /// ```
 #[derive(Debug, Clone)]
 pub struct RegexQuery {
-    regex_pattern: String,
+    automaton: Regex,
     field: Field,
 }
 
 impl RegexQuery {
     /// Creates a new Fuzzy Query
     pub fn new(regex_pattern: String, field: Field) -> RegexQuery {
+        let automaton = Regex::new(&regex_pattern)
+            .map_err(|_| TantivyError::InvalidArgument(regex_pattern.clone())).unwrap();
+
         RegexQuery {
-            regex_pattern,
+            automaton,
+            field,
+        }
+    }
+
+    pub fn new_with_regex(regex: Regex, field: Field) -> RegexQuery {
+        RegexQuery {
+            automaton: regex,
             field,
         }
     }
 
     fn specialized_weight(&self) -> Result<AutomatonWeight<Regex>> {
-        let automaton = Regex::new(&self.regex_pattern)
-            .map_err(|_| TantivyError::InvalidArgument(self.regex_pattern.clone()))?;
-
-        Ok(AutomatonWeight::new(self.field, automaton))
+        Ok(AutomatonWeight::new(self.field, Regex::from(self.automaton.clone())))
     }
 }
 
