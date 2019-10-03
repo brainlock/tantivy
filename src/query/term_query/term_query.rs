@@ -101,6 +101,10 @@ impl TermQuery {
         };
         TermWeight::new(self.term.clone(), index_record_option, bm25_weight)
     }
+
+    pub(crate) fn is_match_only(&self) -> bool {
+        self.index_record_option == IndexRecordOption::Basic
+    }
 }
 
 impl Query for TermQuery {
