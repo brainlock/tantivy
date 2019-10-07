@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use crate::common::BitSet;
 use crate::query::explanation::does_not_match;
+use crate::termdict::TermDictionaryBuilder;
 
 #[derive(Clone, Debug)]
 pub struct TermInSetQuery {
@@ -18,11 +19,14 @@ impl TermInSetQuery {
     pub fn new_u64(field: Field, values: &[u64]) -> Self {
         let mut term = Term::from_field_u64(field, 42);
 
+        let mut sorted_values = values.to_owned();
+        sorted_values.sort();
+
         TermInSetQuery {
             field,
             value_type: Type::U64,
             values: Arc::new(
-                values
+                sorted_values
                     .iter()
                     .map(|value| {
                         term.set_u64(*value);
@@ -66,6 +70,9 @@ impl Weight for SetMembershipWeight {
 
         let inverted_index = reader.inverted_index(self.field);
         let term_dict = inverted_index.terms();
+
+        let field_type = reader.schema().get_field_entry(self.field).field_type();
+
 
         for value in self.values.iter() {
             if let Some(term_info) = term_dict.get(value) {
@@ -130,5 +137,47 @@ mod tests {
         let count = searcher.search(&docs_in_set, &Count).unwrap();
 
         assert_eq!(count, 1500);
+    }
+}
+
+#[cfg(all(test, feature = "unstable"))]
+mod bench {
+    use super::TermInSetQuery;
+    use crate::schema::{Schema, INDEXED};
+    use crate::Index;
+    use crate::collector::Count;
+    use test::Bencher;
+
+    #[bench]
+    fn bench_simple_term_in_set_query(bench: &mut Bencher) {
+        let mut schema_builder = Schema::builder();
+        let numeric_field = schema_builder.add_u64_field("id", INDEXED);
+        let schema = schema_builder.build();
+
+        let index = Index::create_in_ram(schema);
+        {
+            let mut index_writer = index.writer_with_num_threads(1, 6_000_000).unwrap();
+            for x in 0u64..10_000 {
+                index_writer.add_document(doc!(numeric_field => x));
+            }
+            index_writer.commit().unwrap();
+        }
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+
+        let mut in_values = Vec::new();
+
+        for i in 1500..2500u64 {
+            in_values.push(i);
+        }
+        for i in 9500..10500u64 {
+            in_values.push(i);
+        }
+
+        let docs_in_the_sixties = TermInSetQuery::new_u64(numeric_field, &in_values);
+
+        bench.iter(|| {
+            let count = searcher.search(&docs_in_the_sixties, &Count).unwrap();
+        });
     }
 }
