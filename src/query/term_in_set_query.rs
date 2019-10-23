@@ -1,12 +1,12 @@
-use crate::query::{Query, Weight, Scorer, Explanation, ConstScorer, BitSetDocSet};
-use crate::schema::{Field, Type, IndexRecordOption};
+use crate::common::BitSet;
+use crate::query::explanation::does_not_match;
+use crate::query::{BitSetDocSet, ConstScorer, Explanation, Query, Scorer, Weight};
+use crate::schema::{Field, IndexRecordOption, Type};
+use crate::termdict::TermDictionaryBuilder;
 use crate::{Result, SegmentReader, SkipResult};
 use crate::{Searcher, TantivyError, Term};
 use std::collections::HashSet;
 use std::sync::Arc;
-use crate::common::BitSet;
-use crate::query::explanation::does_not_match;
-use crate::termdict::TermDictionaryBuilder;
 
 #[derive(Clone, Debug)]
 pub struct TermInSetQuery {
@@ -19,14 +19,11 @@ impl TermInSetQuery {
     pub fn new_u64(field: Field, values: &[u64]) -> Self {
         let mut term = Term::from_field_u64(field, 42);
 
-        let mut sorted_values = values.to_owned();
-        sorted_values.sort();
-
         TermInSetQuery {
             field,
             value_type: Type::U64,
             values: Arc::new(
-                sorted_values
+                values
                     .iter()
                     .map(|value| {
                         term.set_u64(*value);
@@ -71,9 +68,6 @@ impl Weight for SetMembershipWeight {
         let inverted_index = reader.inverted_index(self.field);
         let term_dict = inverted_index.terms();
 
-        let field_type = reader.schema().get_field_entry(self.field).field_type();
-
-
         for value in self.values.iter() {
             if let Some(term_info) = term_dict.get(value) {
                 let mut block_segment_postings = inverted_index
@@ -102,9 +96,9 @@ impl Weight for SetMembershipWeight {
 #[cfg(test)]
 mod tests {
     use super::TermInSetQuery;
+    use crate::collector::Count;
     use crate::schema::{Schema, INDEXED};
     use crate::Index;
-    use crate::collector::Count;
 
     #[test]
     fn test_term_in_set_query_basic() {
@@ -143,13 +137,18 @@ mod tests {
 #[cfg(all(test, feature = "unstable"))]
 mod bench {
     use super::TermInSetQuery;
-    use crate::schema::{Schema, INDEXED};
-    use crate::Index;
     use crate::collector::Count;
+    use crate::query::{BooleanQuery, Occur, Query, TermQuery};
+    use crate::schema::{Field, IndexRecordOption, Schema, INDEXED};
+    use crate::{Index, IndexReader, Term};
     use test::Bencher;
 
-    #[bench]
-    fn bench_simple_term_in_set_query(bench: &mut Bencher) {
+    fn prepare_bench_example() -> (IndexReader, Field, Vec<u64>) {
+        let n_docs = std::env::var("N_DOCS").expect("Set N_DOCS to control the n. of documents in the index");
+        let n_docs = u64::from_str_radix(&n_docs, 10).expect("N_DOCS must be a positive integer");
+        let in_set_size = std::env::var("IN_SET_SIZE").expect("Set IN_SET_SIZE to control the n. of values in the set to match");
+        let in_set_size = u64::from_str_radix(&in_set_size, 10).expect("IN_SET_SIZE must be a positive integer");
+
         let mut schema_builder = Schema::builder();
         let numeric_field = schema_builder.add_u64_field("id", INDEXED);
         let schema = schema_builder.build();
@@ -157,27 +156,57 @@ mod bench {
         let index = Index::create_in_ram(schema);
         {
             let mut index_writer = index.writer_with_num_threads(1, 6_000_000).unwrap();
-            for x in 0u64..10_000 {
+            for x in 0u64..n_docs {
                 index_writer.add_document(doc!(numeric_field => x));
             }
             index_writer.commit().unwrap();
         }
         let reader = index.reader().unwrap();
-        let searcher = reader.searcher();
 
         let mut in_values = Vec::new();
 
-        for i in 1500..2500u64 {
-            in_values.push(i);
-        }
-        for i in 9500..10500u64 {
+        for i in 1500u64..in_set_size {
             in_values.push(i);
         }
 
-        let docs_in_the_sixties = TermInSetQuery::new_u64(numeric_field, &in_values);
+        (reader, numeric_field, in_values)
+    }
+
+    #[bench]
+    fn bench_simple_term_in_set_query(bench: &mut Bencher) {
+        let (reader, numeric_field, in_values) = prepare_bench_example();
+
+        let searcher = reader.searcher();
+
+        let in_set_query = TermInSetQuery::new_u64(numeric_field, &in_values);
 
         bench.iter(|| {
-            let count = searcher.search(&docs_in_the_sixties, &Count).unwrap();
+            let _count = searcher.search(&in_set_query, &Count).unwrap();
+        });
+    }
+
+    #[bench]
+    fn bench_simple_term_in_set_query_big_bool(bench: &mut Bencher) {
+        let (reader, numeric_field, in_values) = prepare_bench_example();
+
+        let searcher = reader.searcher();
+
+        let big_bool_query = BooleanQuery::from(
+            in_values
+                .iter()
+                .map(|v| {
+                    let boxed_query: Box<dyn Query> = Box::new(TermQuery::new(
+                        Term::from_field_u64(numeric_field, *v),
+                        IndexRecordOption::Basic,
+                    ));
+
+                    (Occur::Should, boxed_query)
+                })
+                .collect::<Vec<_>>(),
+        );
+
+        bench.iter(|| {
+            let _count = searcher.search(&big_bool_query, &Count).unwrap();
         });
     }
 }
