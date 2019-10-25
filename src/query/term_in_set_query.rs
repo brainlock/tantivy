@@ -1,36 +1,36 @@
 use crate::common::BitSet;
 use crate::query::explanation::does_not_match;
 use crate::query::{BitSetDocSet, ConstScorer, Explanation, Query, Scorer, Weight};
-use crate::schema::{Field, IndexRecordOption, Type, FieldType, IntOptions};
-use crate::termdict::{TermDictionaryBuilder, TermDictionary};
+use crate::schema::{Field, IndexRecordOption, Type};
+use crate::termdict::TermDictionaryBuilder;
 use crate::{Result, SegmentReader, SkipResult};
 use crate::{Searcher, TantivyError, Term};
 use std::collections::HashSet;
 use std::sync::Arc;
-use crate::directory::ReadOnlySource;
-use std::cmp::Ordering;
 
 #[derive(Clone, Debug)]
 pub struct TermInSetQuery {
     field: Field,
     value_type: Type,
-    sorted_values: Arc<Vec<Vec<u8>>>,
+    values: Arc<HashSet<Vec<u8>>>,
 }
 
 impl TermInSetQuery {
     pub fn new_u64(field: Field, values: &[u64]) -> Self {
         let mut term = Term::from_field_u64(field, 42);
 
-        let mut sorted_values = values.clone().into_iter().map(|v| {
-            term.set_u64(*v);
-            term.value_bytes().to_vec()
-        }).collect::<Vec<_>>();
-        sorted_values.sort_by(|a, b| a.cmp(b));
-
         TermInSetQuery {
             field,
             value_type: Type::U64,
-            sorted_values: Arc::new(sorted_values),
+            values: Arc::new(
+                values
+                    .iter()
+                    .map(|value| {
+                        term.set_u64(*value);
+                        term.value_bytes().to_owned()
+                    })
+                    .collect(),
+            ),
         }
     }
 }
@@ -50,14 +50,14 @@ impl Query for TermInSetQuery {
 
         Ok(Box::new(SetMembershipWeight {
             field: self.field,
-            sorted_values: self.sorted_values.clone(),
+            values: self.values.clone(),
         }))
     }
 }
 
 struct SetMembershipWeight {
     field: Field,
-    sorted_values: Arc<Vec<Vec<u8>>>,
+    values: Arc<HashSet<Vec<u8>>>,
 }
 
 impl Weight for SetMembershipWeight {
@@ -68,39 +68,16 @@ impl Weight for SetMembershipWeight {
         let inverted_index = reader.inverted_index(self.field);
         let term_dict = inverted_index.terms();
 
-        let mut idx_values = term_dict.stream();
-
-        let mut sorted_values_iter = self.sorted_values.iter();
-
-        let mut has_set_value = sorted_values_iter.next();
-        let mut has_idx_value = idx_values.advance();
-        'outer: while has_set_value.is_some() && has_idx_value {
-            let set_value = has_set_value.unwrap();
-                let idx_value = idx_values.key();
-
-                match set_value.as_slice().cmp(idx_value) {
-                    Ordering::Equal => {
-                        let term_info = idx_values.value();
-                        let mut block_segment_postings = inverted_index
-                            .read_block_postings_from_terminfo(&term_info, IndexRecordOption::Basic);
-                        while block_segment_postings.advance() {
-                            for &doc in block_segment_postings.docs() {
-                                doc_bitset.insert(doc);
-                            }
-                        }
-                        has_set_value = sorted_values_iter.next();
-                        has_idx_value = idx_values.advance();
-                        continue 'outer;
-                    },
-                    Ordering::Less => {
-                        has_set_value = sorted_values_iter.next();
-                        continue 'outer;
-                    }
-                    Ordering::Greater => {
-                        has_idx_value = idx_values.advance();
-                        continue 'outer;
+        for value in self.values.iter() {
+            if let Some(term_info) = term_dict.get(value) {
+                let mut block_segment_postings = inverted_index
+                    .read_block_postings_from_terminfo(&term_info, IndexRecordOption::Basic);
+                while block_segment_postings.advance() {
+                    for &doc in block_segment_postings.docs() {
+                        doc_bitset.insert(doc);
                     }
                 }
+            }
         }
 
         let doc_bitset = BitSetDocSet::from(doc_bitset);
