@@ -300,6 +300,12 @@ impl SegmentReader {
         SegmentReaderAliveDocsIterator::new(&self)
     }
 
+    /// Returns an iterator that will iterate over the deleted document ids
+    pub fn doc_ids_deleted(&self) -> impl Iterator<Item = DocId> + '_ {
+        let ds = &self.delete_bitset_opt;
+        ds.iter().flat_map(|delete_set| delete_set.doc_ids())
+    }
+
     /// Summarize total space usage of this segment.
     pub fn space_usage(&self) -> SegmentSpaceUsage {
         SegmentSpaceUsage::new(

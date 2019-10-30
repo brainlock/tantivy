@@ -53,6 +53,36 @@ impl DeleteBitSet {
         }
     }
 
+    /// Returns an iterator over the `DocId`s in the `DeleteBitSet`
+    pub fn doc_ids(&self) -> impl Iterator<Item = DocId> + '_ {
+        self.data
+            .as_slice()
+            .iter()
+            .enumerate()
+            .flat_map(|(byte_offset, byte)| {
+                let mut doc_ids = Vec::with_capacity(8);
+                let mut byte = *byte;
+                let mut shift = 0;
+                while byte > 0 {
+                    if byte & 1u8 == 1 {
+                        doc_ids.push((byte_offset * 8 + shift) as DocId)
+                    }
+
+                    // let's skip as many zero-bits as we can at once
+                    let next_byte = byte >> 1;
+                    let skip = if next_byte > 0 {
+                        next_byte.trailing_zeros()
+                    }else{
+                        0
+                    };
+
+                    byte = byte >> (1 + skip);
+                    shift += 1 + skip as usize;
+                }
+                doc_ids
+            })
+    }
+
     /// Returns true iff the document is still "alive". In other words, if it has not been deleted.
     pub fn is_alive(&self, doc: DocId) -> bool {
         !self.is_deleted(doc)
@@ -146,5 +176,44 @@ mod tests {
             false,
             delete_bitset.is_deleted((bitset.capacity() + 1) as DocId)
         )
+    }
+
+    fn data_for_test_doc_ids_iterator() -> Vec<Vec<DocId>> {
+        vec![
+            vec![],
+            vec![0],
+            vec![1],
+            vec![2],
+            vec![0, 2],
+            vec![0u32, 7, 8, 11, 31, 32, 33, 51],
+            vec![31],
+            vec![32],
+            vec![33],
+            vec![33, 150],
+        ]
+    }
+
+    #[test]
+    fn test_doc_ids_iterator() {
+        for test_deleted_ids in data_for_test_doc_ids_iterator() {
+            let mut directory = RAMDirectory::create();
+            let test_path = PathBuf::from("test");
+
+            let mut bitset = BitSet::with_capacity(64);
+
+            for i in &test_deleted_ids {
+                bitset.insert(*i as usize);
+            }
+
+            let mut writer = directory.open_write(&*test_path).unwrap();
+            write_delete_bitset(&bitset, &mut writer).unwrap();
+
+            let source = directory.open_read(&test_path).unwrap();
+            let delete_bitset = DeleteBitSet::open(source);
+
+            let doc_ids: Vec<DocId> = delete_bitset.doc_ids().collect();
+
+            assert_eq!(test_deleted_ids, doc_ids);
+        }
     }
 }

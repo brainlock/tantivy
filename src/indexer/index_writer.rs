@@ -157,11 +157,8 @@ pub(crate) fn advance_deletes(
             target_opstamp,
         )?;
 
-        // TODO optimize
-        for doc in 0u32..max_doc {
-            if segment_reader.is_deleted(doc) {
-                delete_bitset.insert(doc as usize);
-            }
+        for doc in segment_reader.doc_ids_deleted() {
+            delete_bitset.insert(doc as usize);
         }
 
         let num_deleted_docs = delete_bitset.len();
