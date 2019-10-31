@@ -55,32 +55,7 @@ impl DeleteBitSet {
 
     /// Returns an iterator over the `DocId`s in the `DeleteBitSet`
     pub fn doc_ids(&self) -> impl Iterator<Item = DocId> + '_ {
-        self.data
-            .as_slice()
-            .iter()
-            .enumerate()
-            .flat_map(|(byte_offset, byte)| {
-                let mut doc_ids = Vec::with_capacity(8);
-                let mut byte = *byte;
-                let mut shift = 0;
-                while byte > 0 {
-                    if byte & 1u8 == 1 {
-                        doc_ids.push((byte_offset * 8 + shift) as DocId)
-                    }
-
-                    // let's skip as many zero-bits as we can at once
-                    let next_byte = byte >> 1;
-                    let skip = if next_byte > 0 {
-                        next_byte.trailing_zeros()
-                    }else{
-                        0
-                    };
-
-                    byte = byte >> (1 + skip);
-                    shift += 1 + skip as usize;
-                }
-                doc_ids
-            })
+        DeleteBitSetIterator::new(&self)
     }
 
     /// Returns true iff the document is still "alive". In other words, if it has not been deleted.
@@ -112,6 +87,87 @@ impl DeleteBitSet {
 impl HasLen for DeleteBitSet {
     fn len(&self) -> usize {
         self.len
+    }
+}
+
+pub struct DeleteBitSetIterator<'a> {
+    delete_bitset_iter: std::iter::Enumerate<std::slice::Iter<'a, u8>>,
+    byte_offset: usize,
+    shift: u8,
+    current_byte: Option<u8>,
+    current_docid: Option<DocId>,
+}
+
+impl<'a> DeleteBitSetIterator<'a> {
+    pub fn new(delete_bitset: &'a DeleteBitSet) -> DeleteBitSetIterator<'a> {
+        DeleteBitSetIterator {
+            delete_bitset_iter: delete_bitset.data.iter().enumerate(),
+            byte_offset: 0,
+            current_byte: None,
+            shift: 0,
+            current_docid: None,
+        }
+    }
+
+    fn next_byte(&mut self) {
+        if self.current_byte.is_none() {
+            self.consume_byte();
+
+            while self.current_byte.is_some() && self.current_byte.unwrap() == 0 {
+                self.consume_byte();
+            }
+
+            self.shift = 0;
+            self.current_docid = None;
+        }
+    }
+
+    fn consume_byte(&mut self) {
+        let (byte_offset, current_byte) = match self.delete_bitset_iter.next() {
+            Some((byte_offset, byte)) => (byte_offset, Some(*byte)),
+            None => (0, None)
+        };
+        self.current_byte = current_byte;
+        self.byte_offset = byte_offset;
+    }
+
+    fn next_bit(&mut self) {
+        if let Some(byte) = self.current_byte {
+            let (current_byte, skipped) = self.skip_zeros(byte);
+            self.shift += skipped;
+
+            self.current_docid = Some((self.byte_offset * 8 + self.shift as usize) as DocId);
+
+            self.shift += 1;
+
+            let next_byte = current_byte >> 1;
+            if next_byte > 0 {
+                self.current_byte = Some(next_byte);
+            }else{
+                self.current_byte = None;
+            }
+        }else{
+            self.current_docid = None;
+        }
+    }
+
+    fn skip_zeros(&mut self, byte: u8) -> (u8, u8) {
+        assert!(byte > 0);
+
+        let skip = byte.trailing_zeros() as u8; // byte is u8, cannot have more than 8 trailing 0s
+        let new_byte = byte >> skip;
+
+        (new_byte, skip)
+    }
+}
+
+impl<'a> Iterator for DeleteBitSetIterator<'a> {
+    type Item = DocId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_byte();
+        self.next_bit();
+        self.current_docid
     }
 }
 
