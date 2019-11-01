@@ -227,6 +227,7 @@ impl SegmentUpdater {
     /// The method returns copies of the segment entries,
     /// updated with the delete information.
     fn purge_deletes(&self, target_opstamp: Opstamp) -> Result<Vec<SegmentEntry>> {
+        trace!("purge_deletes({})", target_opstamp);
         let mut segment_entries = self.0.segment_manager.segment_entries();
         for segment_entry in &mut segment_entries {
             let segment = self.0.index.segment(segment_entry.meta().clone());

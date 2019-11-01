@@ -135,9 +135,11 @@ pub(crate) fn advance_deletes(
 ) -> Result<()> {
     {
         if segment_entry.meta().delete_opstamp() == Some(target_opstamp) {
+            trace!("advance_deletes() up to date.");
             // We are already up-to-date here.
             return Ok(());
         }
+        trace!("advance_deletes() not up date, running");
 
         let segment_reader = SegmentReader::open(&segment)?;
 
@@ -157,6 +159,7 @@ pub(crate) fn advance_deletes(
             target_opstamp,
         )?;
 
+        trace!("advance_deletes() loop");
         for doc in segment_reader.doc_ids_deleted() {
             delete_bitset.insert(doc as usize);
         }
@@ -1204,5 +1207,36 @@ mod tests {
         // second commit: crash
         // in the first commit, there was no "previous deleted bitset" to check
         index_writer.commit().unwrap();
+    }
+}
+
+#[cfg(all(test, feature = "unstable"))]
+mod bench {
+    use test::Bencher;
+    use crate::{schema, Index, Term};
+
+    #[bench]
+    fn bench_big_commit_with_many_deletes(b: &mut Bencher) {
+        let mut schema_builder = schema::Schema::builder();
+        let text_field = schema_builder.add_text_field("text", schema::TEXT);
+        let index = Index::create_from_tempdir(schema_builder.build()).unwrap();
+
+        let mut index_writer = index.writer(3_000_000).unwrap();
+
+        // there must be one deleted document in the segment
+        index_writer.add_document(doc!(text_field=>"b"));
+        index_writer.delete_term(Term::from_field_text(text_field, "b"));
+
+        for text in &["c", "d", "e", "f", "g"] {
+            for _ in 0..300 {
+                index_writer.add_document(doc!(text_field=>*text));
+            }
+        }
+
+        index_writer.commit().unwrap();
+
+        b.iter(|| {
+            index_writer.commit().unwrap()
+        });
     }
 }
