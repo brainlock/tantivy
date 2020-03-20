@@ -783,12 +783,12 @@ impl Drop for IndexWriter {
 mod tests {
 
     use super::super::operation::UserOperation;
-    use crate::collector::TopDocs;
+    use crate::collector::{TopDocs, Count};
     use crate::directory::error::LockError;
     use crate::error::*;
     use crate::indexer::NoMergePolicy;
-    use crate::query::TermQuery;
-    use crate::schema::{self, IndexRecordOption, STRING};
+    use crate::query::{TermQuery, AllQuery};
+    use crate::schema::{self, IndexRecordOption, STRING, INDEXED};
     use crate::Index;
     use crate::ReloadPolicy;
     use crate::Term;
@@ -1264,5 +1264,160 @@ mod tests {
         index_writer.add_document(doc!(idfield=>"myid"));
         let commit = index_writer.commit();
         assert!(commit.is_ok());
+    }
+
+    #[test]
+    fn test_doc_freq_after_delete() {
+        let tmpdir = tempfile::tempdir().unwrap();
+
+        let mut schema_builder = schema::Schema::builder();
+        let id_field = schema_builder.add_u64_field("id", INDEXED);
+        let index = Index::create_in_dir(tmpdir.path(), schema_builder.build()).unwrap();
+
+        let mut index_writer = index.writer_with_num_threads(1, 18_000_000).unwrap();
+
+        // document a, id=1
+        index_writer.add_document(doc!(id_field => 1u64));
+        // document b, id=2
+        index_writer.add_document(doc!(id_field => 2u64));
+
+        assert!(index_writer.commit().is_ok());
+
+        index_writer.delete_term(Term::from_field_u64(id_field.clone(), 1));
+
+        let comm = index_writer.commit();
+        assert!(comm.is_ok());
+
+        let searcher = index.reader().unwrap().searcher();
+
+        let count = searcher.search(&AllQuery, &Count).unwrap();
+
+        assert_eq!(count, 1); // ok, total doc count is 1
+
+        let term_a = Term::from_field_u64(id_field.clone(), 1);
+        let term_b = Term::from_field_u64(id_field.clone(), 2);
+
+        assert_eq!(
+            searcher.search(
+                &TermQuery::new(term_a.clone(), IndexRecordOption::Basic),
+                &Count
+            ).unwrap(),
+            0
+        ); // OK, searching finds 0 a
+
+        assert_eq!(
+            searcher.search(
+                &TermQuery::new(term_b.clone(), IndexRecordOption::Basic),
+                &Count
+            ).unwrap(),
+            1
+        ); // OK, searching finds 1 b
+
+        // reopen
+        drop(index_writer);
+        drop(searcher);
+        drop(index);
+
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        let index = Index::open_in_dir(tmpdir.path()).unwrap();
+
+        let searcher = index.reader().unwrap().searcher();
+
+        assert_eq!(searcher.doc_freq(&term_b), 1); // doc_freq(b) is 1, correct
+        assert_eq!(searcher.doc_freq(&term_a), 0); // FAIL: doc_freq(a) should be 0, but it's 1
+    }
+
+    #[test]
+    fn test_doc_freq_after_deletes_simplified() {
+        let tmpdir = tempfile::tempdir().unwrap();
+
+        let mut schema_builder = schema::Schema::builder();
+        let id_field = schema_builder.add_u64_field("id", INDEXED);
+        let index = Index::create_in_dir(tmpdir.path(), schema_builder.build()).unwrap();
+
+
+        let mut index_writer = index.writer_with_num_threads(1, 18_000_000).unwrap();
+
+        // document a, id=1
+        index_writer.add_document(doc!(id_field => 1u64));
+        // document b, id=2
+        index_writer.add_document(doc!(id_field => 2u64));
+
+        // delete document a
+        index_writer.delete_term(Term::from_field_u64(id_field.clone(), 1));
+
+        let comm = index_writer.commit();
+        assert!(comm.is_ok());
+
+        let searcher = index.reader().unwrap().searcher();
+
+        let count = searcher.search(&AllQuery, &Count).unwrap();
+
+        assert_eq!(count, 1); // OK: total doc count is 1
+
+        let term_a = Term::from_field_u64(id_field.clone(), 1);
+        let term_b = Term::from_field_u64(id_field.clone(), 2);
+
+        assert_eq!(
+            searcher.search(
+                &TermQuery::new(term_a.clone(), IndexRecordOption::Basic),
+                &Count
+            ).unwrap(),
+            0
+        ); // OK: searching finds 0 a
+
+        assert_eq!(
+            searcher.search(
+                &TermQuery::new(term_b.clone(), IndexRecordOption::Basic),
+                &Count
+            ).unwrap(),
+            1
+        ); // OK: searching finds 1 b
+
+        println!("tmpdir: {:?}", tmpdir.path());
+        std::mem::forget(tmpdir);
+
+        assert_eq!(searcher.doc_freq(&term_b), 1); // OK: doc_freq(b) is 1
+        assert_eq!(searcher.doc_freq(&term_a), 0); // FAIL: doc_freq(a) should be 0, but it's 1
+    }
+
+    #[test]
+    fn test_doc_freq_after_delete_many() {
+        let tmpdir = tempfile::tempdir().unwrap();
+
+        let mut schema_builder = schema::Schema::builder();
+        let id_field = schema_builder.add_u64_field("id", INDEXED);
+        let index = Index::create_in_dir(tmpdir.path(), schema_builder.build()).unwrap();
+
+        let mut index_writer = index.writer_with_num_threads(6, 18_000_000).unwrap();
+
+        for _ in 0..100 {
+            index_writer.add_document(doc!(id_field => 1u64));
+        }
+        index_writer.add_document(doc!(id_field => 2u64));
+        // delete all a
+        index_writer.delete_term(Term::from_field_u64(id_field.clone(), 1));
+
+        let comm = index_writer.commit();
+        assert!(comm.is_ok());
+
+        let searcher = index.reader().unwrap().searcher();
+
+        let count = searcher.search(&AllQuery, &Count).unwrap();
+
+        assert_eq!(count, 1); // OK: total doc count is 1
+
+        let term_a = Term::from_field_u64(id_field.clone(), 1);
+
+        assert_eq!(
+            searcher.search(
+                &TermQuery::new(term_a.clone(), IndexRecordOption::Basic),
+                &Count
+            ).unwrap(),
+            0
+        ); // OK: searching finds 0 a
+
+        assert_eq!(searcher.doc_freq(&term_a), 0); // FAIL: doc_freq(a) should be 0, but it's 1
     }
 }

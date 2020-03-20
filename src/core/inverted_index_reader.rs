@@ -189,8 +189,8 @@ impl InvertedIndexReader {
 
     /// Returns the number of documents containing the term.
     pub fn doc_freq(&self, term: &Term) -> u32 {
-        self.get_term_info(term)
-            .map(|term_info| term_info.doc_freq)
+        let term_info = self.get_term_info(term);
+        term_info.map(|term_info| term_info.doc_freq)
             .unwrap_or(0u32)
     }
 }
